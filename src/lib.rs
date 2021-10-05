@@ -53,7 +53,7 @@ pub type ALComponentStorage = Arc<RwLock<HashMap<TypeId, LComponentStore>>>;
 
 pub const PACKED: usize = 0;
 pub const FREE: usize = 1;
-//Arc-RwLock index storage. Used for both indices indices and freed indices. [0] = indices, [1] = free
+//Arc-RwLock index storage. Used for both packed indices and freed indices. [0] = indices, [1] = free
 pub type ALIndices = Arc<RwLock<[HashMap<TypeId, RwLock<BTreeSet<usize>>>; 2]>>;
 
 //Arc-RwLock length storage for keeping track of the number of non-empty slots in component storage.
@@ -87,11 +87,63 @@ impl EcstaticStorage {
 
     pub fn new() -> EcstaticStorage {
         EcstaticStorage {
-            components: Arc::new(RwLock::new(HashMap::new())),
-            indices: Arc::new(RwLock::new([HashMap::new(), HashMap::new()])),
-            lengths: Arc::new(RwLock::new(HashMap::new())),
-            ownership: Arc::new(RwLock::new(HashMap::new())),
+            components: Arc::new(RwLock::new(HashMap::with_capacity(1))),
+            indices: Arc::new(RwLock::new([HashMap::with_capacity(1), HashMap::with_capacity(1)])),
+            lengths: Arc::new(RwLock::new(HashMap::with_capacity(1))),
+            ownership: Arc::new(RwLock::new(HashMap::with_capacity(1))),
         }
+    }
+
+    pub fn debug_dump_components<T>(&self)
+    where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe + std::fmt::Debug
+    {
+        let len = self.components
+            .read().unwrap()
+            .get(&TypeId::of::<T>()).unwrap()
+            .read().unwrap()
+            .len();
+        let cap = self.components
+            .read().unwrap()
+            .get(&TypeId::of::<T>()).unwrap()
+            .read().unwrap()
+            .capacity();
+
+        print!("Type: {}, Capacity: {}, Length: {}\n", type_name::<T>(), cap, len);
+        for c in self.components
+                .read().expect(EcstaticStorage::STORAGE_LOCK_ERROR_MSG)
+                .get(&TypeId::of::<T>()).expect(&format!("{} {}", EcstaticStorage::TYPE_NOT_FOUND_ERROR_MSG, type_name::<T>()))
+                .read().expect(EcstaticStorage::VECTOR_LOCK_ERROR_MSG)
+                .iter() 
+        {
+            print!("{:?}\n", c.read().unwrap().downcast_ref::<T>());
+        }
+    }
+
+    pub fn debug_dump_indices<T>(&self)
+    where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe + std::fmt::Debug
+    {
+        print!("______________\n");
+        print!("Packed:\n");
+        for p in self.indices
+            .read().unwrap()
+            .get(PACKED).unwrap()
+            .get(&TypeId::of::<T>()).unwrap()
+            .read().unwrap()
+            .iter()
+        {
+            print!("\t{}\n", p);
+        }
+        print!("Free:\n");
+        for f in self.indices
+            .read().unwrap()
+            .get(FREE).unwrap()
+            .get(&TypeId::of::<T>()).unwrap()
+            .read().unwrap()
+            .iter()
+        {
+            print!("\t{}\n", f);
+        }
+        print!("______________\n");
     }
 
     pub fn generate_key() -> u64 {
@@ -121,13 +173,21 @@ impl EcstaticStorage {
         self.check_initialized_component_vector::<T>();
         self.check_initialized_lengths::<T>();
         let len = self.len::<T>().unwrap();
-        let i = self.get_index::<T>(len);
-        if let Err(e) = panic::catch_unwind(|| {
+        let i = self.get_index::<T>(len); 
+        if let Err(e) = panic::catch_unwind(|| {   
             self.components
                 .read().expect(EcstaticStorage::STORAGE_LOCK_ERROR_MSG)
                 .get(&TypeId::of::<T>()).expect(&format!("{} {}", EcstaticStorage::TYPE_NOT_FOUND_ERROR_MSG, type_name::<T>()))
                 .write().expect(EcstaticStorage::VECTOR_LOCK_ERROR_MSG)
-                .insert(i, RwLock::new(Box::new(component)));
+                .push(RwLock::new(Box::new(component)));
+            let empty = self.is_empty::<T>(i).unwrap_or(true);
+            if empty {
+                self.components
+                    .read().expect(EcstaticStorage::STORAGE_LOCK_ERROR_MSG)
+                    .get(&TypeId::of::<T>()).expect(&format!("{} {}", EcstaticStorage::TYPE_NOT_FOUND_ERROR_MSG, type_name::<T>()))
+                    .write().expect(EcstaticStorage::VECTOR_LOCK_ERROR_MSG)
+                    .swap_remove(i);
+            }
 
             match self.change_len::<T>(1, |len, amount| -> usize {len + amount}) {
                 Ok(_) => (),
@@ -137,7 +197,6 @@ impl EcstaticStorage {
             self.free_index::<T>(i);
             return Err(ErrStorage::Insert(format!("{:#?}", e)))
         }
-        self.truncate_storage_to_fit::<T>();
         Ok(i)
     }
 
@@ -163,7 +222,6 @@ impl EcstaticStorage {
         }) {
             return Err(ErrStorage::Set(format!("{:#?}", e)))
         }
-        self.truncate_storage_to_fit::<T>();
         Ok(())
     }
 
@@ -194,7 +252,6 @@ impl EcstaticStorage {
             }) {
                 return Err(ErrStorage::Modify(format!("{:#?}", e)))
             }
-            self.truncate_storage_to_fit::<T>();
             Ok(())
         } else {
             return Err(ErrStorage::Empty(format!("EcstaticStorage::modify {}", type_name::<T>())))
@@ -224,7 +281,7 @@ impl EcstaticStorage {
                     .downcast_ref::<T>().expect(&format!("{} type: {}", EcstaticStorage::DOWNCAST_ERROR_MSG, type_name::<T>()))
 
             }) {
-                Ok(v) => { self.truncate_storage_to_fit::<T>(); Ok(v) },
+                Ok(v) => Ok(v),
                 Err(e) => Err(ErrStorage::Read(format!("{:#?}", e)))
             }
         } else {
@@ -237,7 +294,6 @@ impl EcstaticStorage {
     {
         if let Some(i) = self.get_owned_index_for_component::<T>(id)
         {
-            print!("emptying: i: {}\n", i);
             self.ownership
                 .read().unwrap()
                 .get(&id).unwrap()
@@ -312,7 +368,7 @@ impl EcstaticStorage {
     fn truncate_storage_to_fit<T>(&self)
     where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {
-        let len = self.len::<T>().expect("truncate_storage failed to get len."); 
+        let len = self.len::<T>().expect("truncate_storage failed to get len.");
         self.components
             .read().expect(EcstaticStorage::STORAGE_LOCK_ERROR_MSG)
             .get(&TypeId::of::<T>()).expect(&format!("{} {}", EcstaticStorage::TYPE_NOT_FOUND_ERROR_MSG, type_name::<T>()))
@@ -364,6 +420,48 @@ impl EcstaticStorage {
         }
     }
 
+    //Compresses memory for a given type.
+    pub fn compress_memory<T>(&self) -> Result<(), ErrStorage>
+    where T: Any + Send + Sync + Copy + std::panic::UnwindSafe + std::panic::RefUnwindSafe
+    {
+        self.check_initialized_index_set::<T>(PACKED);
+        self.check_initialized_index_set::<T>(FREE);
+ 
+        let packed_len = self.indices
+            .read().unwrap()
+            .get(PACKED).unwrap()
+            .get(&TypeId::of::<T>()).unwrap()
+            .read().unwrap()
+            .len();
+
+        //foreach active component, relocate it to the result of getindex and update the ownership.
+        for i in 0..packed_len {
+            let i_packed = self.indices
+                .read().unwrap()
+                .get(PACKED).unwrap()
+                .get(&TypeId::of::<T>()).unwrap()
+                .write().unwrap()
+                .pop_first().unwrap();
+
+            //swap old component with new component.
+            let old = self.read::<T>(i_packed)?; //read clones the data.
+            self.empty::<T>(i_packed)?; //empty index and free it.
+            let new_i = self.insert::<T>(old).unwrap(); //inserts into next free space.
+        }
+        //all empty spaces should now be right
+        //truncate all empty spaces to the right.
+        self.truncate_storage_to_fit::<T>();
+        
+        self.indices
+            .read().unwrap()
+            .get(PACKED).unwrap()
+            .get(&TypeId::of::<T>()).unwrap()
+            .write().unwrap()
+            .retain(|&i| { i >= self.len::<T>().unwrap() }); //remove from freed indices such that any i >= type_len is removed.
+        //unimplemented!()
+        Ok(())
+    }
+
     fn get_owned_index_for_component<T: Any + Send + Sync>(&self, id: u64) -> Option<usize>
     {
         Some(*self.ownership
@@ -400,8 +498,8 @@ impl EcstaticStorage {
             .get(FREE).unwrap()
             .get(&TypeId::of::<T>()).unwrap()
             .write().unwrap()
-            .first() {
-                Some(first) => index = *first,
+            .pop_first() {
+                Some(first) => index = first,
                 None => index = default_index,
         }
 
@@ -452,7 +550,7 @@ impl EcstaticStorage {
     fn initialize_storage_vector<T: Any + Send + Sync>(&self) {
         self.components
             .write().unwrap()
-            .insert(TypeId::of::<T>(), RwLock::new(vec![]));
+            .insert(TypeId::of::<T>(), RwLock::new(Vec::with_capacity(1)));
     }
 
     fn check_initialized_index_set<T: Any + Send + Sync>(&self, which: usize) {
@@ -482,7 +580,7 @@ impl EcstaticStorage {
             is_initialized = false;
         }
         if !is_initialized {
-            self.ownership.write().unwrap().insert(*id, RwLock::new(HashMap::new()));
+            self.ownership.write().unwrap().insert(*id, RwLock::new(HashMap::with_capacity(1)));
         }
     }
 }
@@ -530,15 +628,54 @@ fn test_ecempty() {
 }
 
 #[test]
-fn test_reusing_indices_and_capacity() {
+fn test_ecread_ecempty_many_and_capacity() {
+    let ecst = EcstaticStorage::new();
+    let key1 = EcstaticStorage::generate_key();
+    let key2 = EcstaticStorage::generate_key();
+    let key3 = EcstaticStorage::generate_key();
+
+    ecst.ecinsert::<u8>(key1, 1);
+    ecst.ecinsert::<u8>(key2, 2);
+    ecst.ecinsert::<u8>(key3, 3);
+
+    ecst.ecempty::<u8>(key1);
+    ecst.ecempty::<u8>(key2);
+
+    let read = ecst.ecread::<u8>(key3).unwrap();
+    assert!(read == 3);
+
+    let read = ecst.ecread::<u8>(key3).unwrap();
+    assert!(read == 3);
+
+    ecst.debug_dump_indices::<u8>();
+    ecst.ecinsert::<u8>(key1, 4);
+
+    let read = ecst.ecread::<u8>(key1).unwrap();
+    assert!(read == 4);
+
+    ecst.ecinsert::<u8>(key2, 5);
+
+    let read = ecst.ecread::<u8>(key2).unwrap();
+    assert!(read == 5, "actual: {}, expected: {}\n", read, 5);
+}
+
+#[test]
+fn test_reusing_indices_and_single_compression_capacity() {
     let ecst = EcstaticStorage::new();
     let key1 = EcstaticStorage::generate_key();
     for i in 0..10 {
         ecst.ecinsert::<u8>(key1, 1);
         ecst.ecempty::<u8>(key1);
     }
-    //indices are reused if capacity remains 1.
+    
     ecst.ecinsert::<u8>(key1, 1);
+
+    print!("\n\nbefore_compress\n");
+    ecst.debug_dump_components::<u8>();
+    print!("\n\nafter_compress\n");
+    ecst.compress_memory::<u8>();
+    ecst.debug_dump_components::<u8>();
+
     let cap = ecst.capacity::<u8>().unwrap();
     assert!(cap == 1, "ecst.capacity t1 :: actual: {}, expected: {}\n", cap, 1);
 }
