@@ -1,17 +1,4 @@
-// Dynamically typed thread safe component storage. EcstaticStorage
-
-//TODO:
-// 
-// All indices may need to be references instead of copy to avoid certain race conditions involving the removal of a component and index which is then read after removal
-//  ...or we let the user deal with the issue of missing indices 
-//
-// Tests for wrapper functions: ecread, ecmodify, ecinsert, etc...
-// Tests to confirm thread saftey of wrapper functions.
-// Implement memory management function to clear up empty spaces.
-// 
-// Extract error messages into static strings for wrapper functions.
-// ctrl+f TODO and remove when done.
-// Document crate using built-in documentation.
+//! Dynamically typed thread safe component storage.
 
 #![feature(map_first_last)]
 
@@ -42,32 +29,34 @@ pub enum ErrStorage {
     Insert(String),
 }
 
-//RwLock Component
+/// Locked Component Type.
 pub type LComponent = RwLock<Box<dyn Any + Send + Sync>>;
 
-//RwLock Component store
+/// Locked Component Vector
 pub type LComponentStore = RwLock<Vec<LComponent>>;
 
-//Arc-RwLock Component Storage {Arc<RwLock<HashMap<TypeId, Arc<RwLock<Vec<Arc<RwLock<Box<dyn Any + Send + Sync>>>>>>>>>}
+/// Arc Locked Storage Map
 pub type ALComponentStorage = Arc<RwLock<HashMap<TypeId, LComponentStore>>>;
 
 pub const PACKED: usize = 0;
 pub const FREE: usize = 1;
 //Arc-RwLock index storage. Used for both packed indices and freed indices. [0] = indices, [1] = free
+
+/// Arc Locked index map array. Contains indices currently in use accessed by PACKED or 0 and indices ready for reuse accessed by FREE or 1.
 pub type ALIndices = Arc<RwLock<[HashMap<TypeId, RwLock<BTreeSet<usize>>>; 2]>>;
 
-//Arc-RwLock length storage for keeping track of the number of non-empty slots in component storage.
+/// Arc Locked length storage for keeping track of the number of non-empty slots in component storage.
 pub type ALLengths = Arc<RwLock<HashMap<TypeId, RwLock<usize>>>>;
 
-//Arc-Rwlock ownership tracking. id -> owned component types and its index. 
+/// Arc Locked ownership tracking. u64 id -> owned component types and their respective indices. 
 pub type ALOwnership = Arc<RwLock<HashMap<u64, RwLock<HashMap<TypeId, usize>>>>>;
 
-//Required to modify a downcast_mut element after obtaining the lock.
+/// Type required by EcstaticStorage::ecmodify() to modify a component in storage without explicitly setting it.
 pub type Modify<T> = fn(&mut T);
 
 type ChLenFunc = fn(usize, usize) -> usize;
 
-//An empty type for emptying component memory.
+/// An empty type for marking free component memory.
 pub enum Empty { Empty }
 
 pub struct EcstaticStorage {
@@ -84,17 +73,20 @@ impl EcstaticStorage {
     const ELEMENT_LOCK_ERROR_MSG: &'static str = "Failed to acquire element lock.";
     const DOWNCAST_ERROR_MSG: &'static str = "Failed to downcast value for type ->";
     const LEN_NOT_FOUND_ERROR_MSG: &'static str = "Failed to find length corresponding to type ->";
+    const INDEX_NOT_FOUND_ERROR_MSG: &'static str = "Failed locate component index for the given id. ->";
+    const ECINSERT_FAILED_ERROR_MSG: &'static str = "Failed to insert component. ->";
+    const COMPONENT_EMPTY_ERROR_MSG: &'static str = "Expected non-empty component, but found empty. ->";
 
-    pub fn new() -> EcstaticStorage {
-        EcstaticStorage {
+    pub fn new() -> Arc<EcstaticStorage> {
+        Arc::new(EcstaticStorage {
             components: Arc::new(RwLock::new(HashMap::with_capacity(1))),
             indices: Arc::new(RwLock::new([HashMap::with_capacity(1), HashMap::with_capacity(1)])),
             lengths: Arc::new(RwLock::new(HashMap::with_capacity(1))),
             ownership: Arc::new(RwLock::new(HashMap::with_capacity(1))),
-        }
+        })
     }
 
-    pub fn debug_dump_components<T>(&self)
+    fn debug_dump_components<T>(&self)
     where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe + std::fmt::Debug
     {
         let len = self.components
@@ -119,7 +111,7 @@ impl EcstaticStorage {
         }
     }
 
-    pub fn debug_dump_indices<T>(&self)
+    fn debug_dump_indices<T>(&self)
     where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe + std::fmt::Debug
     {
         print!("______________\n");
@@ -146,12 +138,14 @@ impl EcstaticStorage {
         print!("______________\n");
     }
 
+    /// Default function to generate a unique u64 key for use as an id for EcstaticStorage functions.
     pub fn generate_key() -> u64 {
         let mut hasher = DefaultHasher::new();
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap().hash(&mut hasher);
         hasher.finish()
     }
 
+    /// Inserts a component into storage and maps the component to the id.
     pub fn ecinsert<T>(&self, id: u64, component: T) -> Result<(), ErrStorage>
     where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {
@@ -163,10 +157,9 @@ impl EcstaticStorage {
                 .write().unwrap()
                 .insert(TypeId::of::<T>(), i);
             Ok(())
-        } else { Err(ErrStorage::GetIndex(format!("Could not read component type: {} from id: {}. Index not found.\n", type_name::<T>(), id))) }
+        } else { Err(ErrStorage::Insert(format!("{} type: {}, id: {}", EcstaticStorage::ECINSERT_FAILED_ERROR_MSG, type_name::<T>(), id))) }
     }
 
-    //inserts a component into storage by type and returns the index it was inserted into.
     fn insert<T>(&self, component: T) -> Result<usize, ErrStorage>
     where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {
@@ -200,14 +193,14 @@ impl EcstaticStorage {
         Ok(i)
     }
 
+    /// Replaces the component in storage owned by the given id with the given component.
     pub fn ecset<T>(&self, id: u64, with: T) -> Result<(), ErrStorage>
     where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {  
         if let Some(i) = self.get_owned_index_for_component::<T>(id){ self.set::<T>(i, with) } 
-        else { Err(ErrStorage::GetIndex(format!("Could not read component type: {} from id: {}. Index not found.\n", type_name::<T>(), id))) }
+        else { Err(ErrStorage::GetIndex(format!("{} type: {} id: {}", EcstaticStorage::INDEX_NOT_FOUND_ERROR_MSG, type_name::<T>(), id))) }
     }
 
-    //replaces a component at the given index with the given component.
     fn set<T>(&self, i: usize, component: T) -> Result<(), ErrStorage>
     where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {
@@ -225,14 +218,15 @@ impl EcstaticStorage {
         Ok(())
     }
 
+    /// Modifies the value of a component owned by the given id through the provided callback without replacing the value entirely.
     pub fn ecmodify<T>(&self, id: u64, modify: Modify<T>) -> Result<(), ErrStorage>
     where T: Any + Send + Sync + Copy + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {
         if let Some(i) = self.get_owned_index_for_component::<T>(id) { self.modify::<T>(i, modify) } 
-        else { Err(ErrStorage::GetIndex(format!("Could not read component type: {} from id: {}. Index not found.\n", type_name::<T>(), id))) }
+        else { Err(ErrStorage::GetIndex(format!("{} type: {} id: {}", EcstaticStorage::INDEX_NOT_FOUND_ERROR_MSG, type_name::<T>(), id))) }
+        
     }
 
-    //modifies the component using the provided function.
     fn modify<T>(&self, i: usize, modify: Modify<T>) -> Result<(), ErrStorage>
     where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {
@@ -254,18 +248,18 @@ impl EcstaticStorage {
             }
             Ok(())
         } else {
-            return Err(ErrStorage::Empty(format!("EcstaticStorage::modify {}", type_name::<T>())))
+            return Err(ErrStorage::Empty(format!("{} type: {}", EcstaticStorage::COMPONENT_EMPTY_ERROR_MSG, type_name::<T>())))
         }
     }
 
+    /// Returns a copy of the component owned by the given id.
     pub fn ecread<T>(&self, id: u64) -> Result<T, ErrStorage>
     where T: Any + Send + Sync + Copy + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {
         if let Some(i) = self.get_owned_index_for_component::<T>(id) { self.read::<T>(i) }
-        else { Err(ErrStorage::GetIndex(format!("Could not read component type: {} from id: {}. Index not found.\n", type_name::<T>(), id))) }
+        else { Err(ErrStorage::GetIndex(format!("{} type: {} id: {}", EcstaticStorage::INDEX_NOT_FOUND_ERROR_MSG, type_name::<T>(), id))) }
     }
 
-    //reads the component at given index.
     fn read<T>(&self, i: usize) -> Result<T, ErrStorage>
     where T: Any + Send + Sync + Copy + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {
@@ -285,10 +279,11 @@ impl EcstaticStorage {
                 Err(e) => Err(ErrStorage::Read(format!("{:#?}", e)))
             }
         } else {
-            return Err(ErrStorage::Empty(format!("EcstaticStorage::read {}", type_name::<T>())))
+            return Err(ErrStorage::Empty(format!("{} type: {}", EcstaticStorage::COMPONENT_EMPTY_ERROR_MSG, type_name::<T>())))
         }
     }
 
+    /// Empties the component for the given id. WARNING: This does NOT free up the memory associated with the component. It only marks it as empty for either reuse in subsequent inserts or for compress_memory to free the memory.
     pub fn ecempty<T>(&self, id: u64) -> Result<(), ErrStorage>
     where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {
@@ -301,10 +296,9 @@ impl EcstaticStorage {
                 .remove(&TypeId::of::<T>()).unwrap();
             self.empty::<T>(i)
         }
-        else { Err(ErrStorage::GetIndex(format!("Could not read component type: {} from id: {}. Index not found.\n", type_name::<T>(), id))) }
+        else { Err(ErrStorage::GetIndex(format!("{} type: {} id: {}", EcstaticStorage::INDEX_NOT_FOUND_ERROR_MSG, type_name::<T>(), id))) }
     }
 
-    //Empties, but doesn't deallocate, memory at index for a component type.
     fn empty<T>(&self, i: usize) -> Result<(), ErrStorage>
     where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {
@@ -333,6 +327,7 @@ impl EcstaticStorage {
         Ok(())
     }
 
+    /// Returns the length of all components including the empty ones. Note: this may not reflect the underlying vector capacity until compress_memory is called at least once.
     pub fn capacity<T>(&self) -> Result<usize, ErrStorage>
     where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {
@@ -349,7 +344,7 @@ impl EcstaticStorage {
         }
     }
 
-    //returns the count of non-empty components of the underlying component vector by type.
+    /// Returns the count of non-empty components. Empty components are NOT counted.
     pub fn len<T>(&self) -> Result<usize, ErrStorage>
     where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {
@@ -362,23 +357,6 @@ impl EcstaticStorage {
             Ok(v) => Ok(v),
             Err(e) => Err(ErrStorage::LenFunc(format!("{:#?}", e)))
         }
-    }
-
-    //Note: Do not truncate during emptying. only during insert/set/modify/read operations.
-    fn truncate_storage_to_fit<T>(&self)
-    where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe
-    {
-        let len = self.len::<T>().expect("truncate_storage failed to get len.");
-        self.components
-            .read().expect(EcstaticStorage::STORAGE_LOCK_ERROR_MSG)
-            .get(&TypeId::of::<T>()).expect(&format!("{} {}", EcstaticStorage::TYPE_NOT_FOUND_ERROR_MSG, type_name::<T>()))
-            .write().expect(EcstaticStorage::VECTOR_LOCK_ERROR_MSG)
-            .truncate(len);
-        self.components
-            .read().expect(EcstaticStorage::STORAGE_LOCK_ERROR_MSG)
-            .get(&TypeId::of::<T>()).expect(&format!("{} {}", EcstaticStorage::TYPE_NOT_FOUND_ERROR_MSG, type_name::<T>()))
-            .write().expect(EcstaticStorage::VECTOR_LOCK_ERROR_MSG)
-            .shrink_to_fit();
     }
 
     fn change_len<T>(&self, amount: usize, f: ChLenFunc) -> Result<(), ErrStorage>
@@ -398,7 +376,6 @@ impl EcstaticStorage {
         }
     }
 
-    //checks if the value of a type is empty.
     fn is_empty<T>(&self, i: usize) -> Result<bool, ErrStorage>
     where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {
@@ -420,7 +397,24 @@ impl EcstaticStorage {
         }
     }
 
-    //Compresses memory for a given type.
+    fn truncate_storage_to_fit<T>(&self)
+    where T: Any + Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe
+    {
+        let len = self.len::<T>().expect("truncate_storage failed to get len.");
+        self.components
+            .read().expect(EcstaticStorage::STORAGE_LOCK_ERROR_MSG)
+            .get(&TypeId::of::<T>()).expect(&format!("{} {}", EcstaticStorage::TYPE_NOT_FOUND_ERROR_MSG, type_name::<T>()))
+            .write().expect(EcstaticStorage::VECTOR_LOCK_ERROR_MSG)
+            .truncate(len);
+        self.components
+            .read().expect(EcstaticStorage::STORAGE_LOCK_ERROR_MSG)
+            .get(&TypeId::of::<T>()).expect(&format!("{} {}", EcstaticStorage::TYPE_NOT_FOUND_ERROR_MSG, type_name::<T>()))
+            .write().expect(EcstaticStorage::VECTOR_LOCK_ERROR_MSG)
+            .shrink_to_fit();
+    }
+
+
+    /// Compresses memory for a given type. Use this after emptying a large number of components to free up memory.
     pub fn compress_memory<T>(&self) -> Result<(), ErrStorage>
     where T: Any + Send + Sync + Copy + std::panic::UnwindSafe + std::panic::RefUnwindSafe
     {
@@ -458,7 +452,6 @@ impl EcstaticStorage {
             .get(&TypeId::of::<T>()).unwrap()
             .write().unwrap()
             .retain(|&i| { i >= self.len::<T>().unwrap() }); //remove from freed indices such that any i >= type_len is removed.
-        //unimplemented!()
         Ok(())
     }
 
@@ -584,9 +577,6 @@ impl EcstaticStorage {
         }
     }
 }
-
-//TODO:
-// test thread safety
 
 #[test]
 fn test_ecinsert() {
@@ -791,4 +781,19 @@ fn test_ecmodify() {
     ecst.ecmodify::<u8>(key1, |v| { *v += 200; }); //Modify<T> = fn(&mut T);
     let read1 = ecst.ecread::<u8>(key1).unwrap();
     assert!(read1 == 201, "ecst.modify t1 :: actual: {}, expected: {}\n", read1, 201);
+}
+
+#[test]
+fn test_multi_thread() {
+    let ecst = EcstaticStorage::new(); //returns an Arc<Storage>
+    let key1 = EcstaticStorage::generate_key();
+    let ecst_clone = ecst.clone();
+
+    let handle = thread::spawn(move ||{
+        ecst_clone.ecinsert::<u8>(key1, 1);
+    });
+    handle.join();
+
+    let read = ecst.ecread::<u8>(key1).unwrap();
+    assert!(read == 1);
 }
