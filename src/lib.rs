@@ -13,9 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::hash::{Hash, Hasher};
 
 //ignore these warnings as they are relevant for unit tests.
-use std::sync::Barrier;
 use std::thread;
-use std::sync::mpsc::channel;
 
 
 #[derive(Debug)]
@@ -241,7 +239,7 @@ impl EcstaticStorage {
                     .write() 
                 {
                     Ok(mut value) => modify(value.downcast_mut::<T>().expect(&format!("{} type: {}", EcstaticStorage::DOWNCAST_ERROR_MSG, type_name::<T>()))),
-                    Err(e) => panic!("{}", EcstaticStorage::ELEMENT_LOCK_ERROR_MSG)
+                    Err(e) => panic!("{} {}", EcstaticStorage::ELEMENT_LOCK_ERROR_MSG, e)
                 }
             }) {
                 return Err(ErrStorage::Modify(format!("{:#?}", e)))
@@ -318,7 +316,7 @@ impl EcstaticStorage {
                             Err(e) => panic!("{:#?}", e),
                         }
                     },
-                    Err(e) => panic!("{}", EcstaticStorage::ELEMENT_LOCK_ERROR_MSG)
+                    Err(e) => panic!("{} {}", EcstaticStorage::ELEMENT_LOCK_ERROR_MSG, e)
                 }
         }) {
             return Err(ErrStorage::Empty(format!("{:#?}", e)))
@@ -371,7 +369,7 @@ impl EcstaticStorage {
                     Err(e) => panic!("{}", e),
                 }
         }) {
-            Ok(v) => Ok(()),
+            Ok(_) => Ok(()),
             Err(e) => Err(ErrStorage::LenFunc(format!("{:#?}", e)))
         }
     }
@@ -429,7 +427,7 @@ impl EcstaticStorage {
             .len();
 
         //foreach active component, relocate it to the result of getindex and update the ownership.
-        for i in 0..packed_len {
+        for _ in 0..packed_len {
             let i_packed = self.indices
                 .read().unwrap()
                 .get(PACKED).unwrap()
@@ -440,7 +438,7 @@ impl EcstaticStorage {
             //swap old component with new component.
             let old = self.read::<T>(i_packed)?; //read clones the data.
             self.empty::<T>(i_packed)?; //empty index and free it.
-            let new_i = self.insert::<T>(old).unwrap(); //inserts into next free space.
+            self.insert::<T>(old).unwrap(); //inserts into next free space.
         }
         //all empty spaces should now be right
         //truncate all empty spaces to the right.
