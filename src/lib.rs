@@ -11,8 +11,6 @@ use std::panic;
 use std::collections::hash_map::DefaultHasher;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::hash::{Hash, Hasher};
-
-//ignore these warnings as they are relevant for unit tests.
 use std::thread;
 
 
@@ -334,7 +332,7 @@ impl EcstaticStorage {
                 .read().expect(EcstaticStorage::STORAGE_LOCK_ERROR_MSG)
                 .get(&TypeId::of::<T>()).expect(&format!("{} {}", EcstaticStorage::TYPE_NOT_FOUND_ERROR_MSG, type_name::<T>()))
                 .read().expect(EcstaticStorage::VECTOR_LOCK_ERROR_MSG)
-                .len() //capacity = len because emptying a component does not remove the allocation from the vector.
+                .len() //capacity is equal to len because emptying a component does not remove the allocation from the vector.
 
         }) {
             Ok(v) => Ok(v),
@@ -426,7 +424,6 @@ impl EcstaticStorage {
             .read().unwrap()
             .len();
 
-        //foreach active component, relocate it to the result of getindex and update the ownership.
         for _ in 0..packed_len {
             let i_packed = self.indices
                 .read().unwrap()
@@ -436,20 +433,17 @@ impl EcstaticStorage {
                 .pop_first().unwrap();
 
             //swap old component with new component.
-            let old = self.read::<T>(i_packed)?; //read clones the data.
-            self.empty::<T>(i_packed)?; //empty index and free it.
-            self.insert::<T>(old).unwrap(); //inserts into next free space.
+            let old = self.read::<T>(i_packed)?;
+            self.empty::<T>(i_packed)?;
+            self.insert::<T>(old).unwrap();
         }
-        //all empty spaces should now be right
-        //truncate all empty spaces to the right.
-        self.truncate_storage_to_fit::<T>();
-        
+        self.truncate_storage_to_fit::<T>();       
         self.indices
             .read().unwrap()
             .get(PACKED).unwrap()
             .get(&TypeId::of::<T>()).unwrap()
             .write().unwrap()
-            .retain(|&i| { i >= self.len::<T>().unwrap() }); //remove from freed indices such that any i >= type_len is removed.
+            .retain(|&i| { i >= self.len::<T>().unwrap() });
         Ok(())
     }
 
