@@ -26,29 +26,29 @@ pub enum ErrStorage {
 }
 
 /// Locked Component Type.
-pub type LComponent = RwLock<Box<dyn Any + Send + Sync>>;
+type LComponent = RwLock<Box<dyn Any + Send + Sync>>;
 
 /// Locked Component Vector
-pub type LComponentStore = RwLock<Vec<LComponent>>;
+type LComponentStore = RwLock<Vec<LComponent>>;
 
 /// Arc Locked Storage Map
-pub type ALComponentStorage = Arc<RwLock<HashMap<TypeId, LComponentStore>>>;
+type ALComponentStorage = Arc<RwLock<HashMap<TypeId, LComponentStore>>>;
 
-pub const PACKED: usize = 0;
-pub const FREE: usize = 1;
+const PACKED: usize = 0;
+const FREE: usize = 1;
 //Arc-RwLock index storage. Used for both packed indices and freed indices. [0] = indices, [1] = free
 
 /// Arc Locked index map array. Contains indices currently in use accessed by PACKED or 0 and indices ready for reuse accessed by FREE or 1.
-pub type ALIndices = Arc<RwLock<[HashMap<TypeId, RwLock<BTreeSet<usize>>>; 2]>>;
+type ALIndices = Arc<RwLock<[HashMap<TypeId, RwLock<BTreeSet<usize>>>; 2]>>;
 
 /// Arc Locked length storage for keeping track of the number of non-empty slots in component storage.
-pub type ALLengths = Arc<RwLock<HashMap<TypeId, RwLock<usize>>>>;
+type ALLengths = Arc<RwLock<HashMap<TypeId, RwLock<usize>>>>;
 
 /// Arc Locked ownership tracking. u64 id -> owned component types and their respective indices. 
-pub type ALOwnership = Arc<RwLock<HashMap<u64, RwLock<HashMap<TypeId, usize>>>>>;
+type ALOwnership = Arc<RwLock<HashMap<u64, RwLock<HashMap<TypeId, usize>>>>>;
 
 /// Type required by EcstaticStorage::ecmodify() to modify a component in storage without explicitly setting it.
-pub type Modify<T> = fn(&mut T);
+type Modify<T> = fn(&mut T);
 
 type ChLenFunc = fn(usize, usize) -> usize;
 
